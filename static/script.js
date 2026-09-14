@@ -1,0 +1,14 @@
+let carts=JSON.parse(localStorage.getItem("anderson_cart")||"[]"),favs=JSON.parse(localStorage.getItem("anderson_fav")||"[]"),hi=0,oi=0;
+function update(){const t=document.getElementById("total");if(t)t.textContent="$"+carts.reduce((s,x)=>s+x.price,0).toFixed(2)}
+function cart(id,name,price,image){carts.push({id,name,price:Number(price),image});localStorage.setItem("anderson_cart",JSON.stringify(carts));update();alert("Producto agregado al carrito.")}
+function fav(id){id=String(id);if(favs.includes(id))favs=favs.filter(x=>x!==id);else favs.push(id);localStorage.setItem("anderson_fav",JSON.stringify(favs));alert("Favoritos actualizado.")}
+function showCart(){let b=document.getElementById("modalBox");b.innerHTML="<h2>Mi carrito</h2>"+(carts.map((x,i)=>`<p><img src="${x.image}" style="width:50px;height:40px;object-fit:contain"> ${x.name} — $${x.price.toFixed(2)} <button onclick="carts.splice(${i},1);localStorage.setItem('anderson_cart',JSON.stringify(carts));showCart();update()">×</button></p>`).join("")||"<p>Carrito vacío.</p>")+`<h3>Total: $${carts.reduce((s,x)=>s+x.price,0).toFixed(2)}</h3><button class="primary" onclick="alert('Compra simulada realizada.');document.getElementById('modal').style.display='none'">FINALIZAR COMPRA</button>`;document.getElementById("modal").style.display="flex"}
+function showFav(){alert(favs.length?`Tienes ${favs.length} producto(s) en favoritos.`:"No tienes favoritos.")}
+function move(kind,n){const cls=kind==="hero"?".slide":".offerSlide",a=[...document.querySelectorAll(cls)];if(!a.length)return;let idx=kind==="hero"?hi:oi;idx=(idx+n+a.length)%a.length;a.forEach(x=>x.classList.remove("active"));a[idx].classList.add("active");if(kind==="hero")hi=idx;else oi=idx}
+function moveProducts(n){const viewport=document.querySelector(".productsViewport"),track=document.getElementById("productTrack");if(!viewport||!track)return;const cards=[...track.querySelectorAll(".product")].filter(x=>x.style.display!=="none");if(!cards.length)return;const card=cards[0],gap=parseInt(getComputedStyle(track).gap)||13,step=card.getBoundingClientRect().width+gap,amount=step*2,max=viewport.scrollWidth-viewport.clientWidth;if(max<=0)return;let target=viewport.scrollLeft+n*amount;if(target>=max-2)target=0;if(target<0)target=max;viewport.scrollTo({left:target,behavior:"smooth"})}
+setInterval(()=>move("hero",1),4000);setInterval(()=>move("offer",1),4000);update();
+function searchProducts(){let q=document.getElementById("q").value.toLowerCase();document.querySelectorAll(".product").forEach(x=>x.style.display=(x.dataset.name.includes(q)||x.dataset.cat.includes(q))?"block":"none")}
+function filterCat(c){document.getElementById("q").value=c;searchProducts();document.getElementById("productos").scrollIntoView({behavior:"smooth"})}
+document.addEventListener("click",e=>{if(e.target.id==="modal")e.target.style.display="none"})
+
+setInterval(()=>moveProducts(1),4000);

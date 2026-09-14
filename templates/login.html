@@ -1,0 +1,7 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acceso del propietario</title><link rel="stylesheet" href="{{url_for('static',filename='style.css')}}"></head>
+<body class="login"><form method="post" class="loginCard">
+<div class="loginLogo">{% if logo %}<img src="{{logo}}" alt="Logo de la tienda">{% else %}<span>Anderson</span><small>ALMACENES</small>{% endif %}</div>
+<div class="lock">🔒</div><h1>Acceso del propietario</h1><p>Ingresa tus datos para administrar la tienda.</p>
+{% with messages=get_flashed_messages() %}{% if messages %}<div class="flash">{{messages[0]}}</div>{% endif %}{% endwith %}
+<label>Usuario</label><input name="user" value="propietario"><label>Contraseña</label><input name="password" type="password"><button class="primary">↪ INGRESAR</button><a href="/">← Volver a la tienda</a><hr><small>🛡 Área exclusiva del propietario</small>
+</form></body></html>

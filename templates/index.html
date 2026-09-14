@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Almacenes Anderson</title>
+<link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+</head>
+<body>
+<header>
+  <div class="mini">{{ mini_text }}</div>
+  <div class="bar">
+    <a class="logo" href="/">
+      {% if logo %}<img src="{{ logo }}" alt="Logo de la tienda">{% else %}<span>Anderson</span><small>ALMACENES</small>{% endif %}
+    </a>
+    <div class="search"><input id="q" placeholder="Buscar productos, categorías o marcas..." oninput="searchProducts()"><button>⌕</button></div>
+    <div class="icons"><button onclick="showFav()">♡<small>Favoritos</small></button><button onclick="showCart()">🛒<small>Carrito <b id="total">$0.00</b></small></button><a href="/login">◯<small>Mi cuenta</small></a></div>
+  </div>
+  <nav><b>☰ TODAS LAS CATEGORÍAS</b>{% for item in nav %}<a href="{{ item.url }}">{{ item.label }}</a>{% endfor %}</nav>
+</header>
+
+<section class="hero carousel" data-kind="hero">
+  {% for x in hero %}<img class="slide {% if loop.first %}active{% endif %}" src="{{x.image}}" alt="Banner {{loop.index}}">{% endfor %}
+  {% if hero|length > 1 %}<button class="left" onclick="move('hero',-1)">‹</button><button class="right" onclick="move('hero',1)">›</button>{% endif %}
+</section>
+
+<section class="benefits">
+  <div>🚚 <b>Envío rápido</b><small>A todo el país</small></div><div>▣ <b>Crédito directo</b><small>Fácil y rápido</small></div><div>♢ <b>Compra segura</b><small>Protegemos tus datos</small></div><div>✓ <b>Garantía Anderson</b><small>Respaldamos tu compra</small></div><div>♧ <b>Atención personalizada</b><small>Estamos para ayudarte</small></div>
+</section>
+
+<section class="section categoriesSection" id="marcas"><div class="sectionTitle"><h2>CATEGORÍAS DESTACADAS</h2></div><div class="cats">{% for c in categories %}<button class="catCard" onclick="filterCat({{c.name|tojson}})">{% if c.image %}<img src="{{c.image}}" alt="{{c.name}}">{% else %}<span class="catPlaceholder">▣</span>{% endif %}<b>{{c.name}}</b></button>{% endfor %}</div></section>
+
+<section class="offer carousel" id="ofertas" data-kind="offer">
+  {% for x in offers %}<img class="offerSlide {% if loop.first %}active{% endif %}" src="{{x.image}}" alt="Oferta {{loop.index}}">{% endfor %}
+  {% if offers|length > 1 %}<button class="left" onclick="move('offer',-1)">‹</button><button class="right" onclick="move('offer',1)">›</button>{% endif %}
+</section>
+
+<section class="section" id="productos">
+  <div class="sectionTitle"><h2>PRODUCTOS DESTACADOS</h2><div class="productArrows"><button onclick="moveProducts(-1)">‹</button><button onclick="moveProducts(1)">›</button></div></div>
+  <div class="productsViewport"><div class="products" id="productTrack">
+    {% for p in products %}<article class="product" data-name="{{p.name|lower}}" data-cat="{{p.category|lower}}"><div class="pic"><span>{{'OFERTA' if p.old_price else 'NUEVO'}}</span><button class="favBtn" onclick="event.stopPropagation();fav('{{p.id}}')">♡</button><a class="productLink" href="{{ url_for('product_detail', pid=p.id) }}"><img src="{{p.image}}" alt="{{p.name}}"></a></div><a class="productLink productInfoLink" href="{{ url_for('product_detail', pid=p.id) }}"><small>{{p.category}}</small><h3>{{p.name}}</h3><div class="price">${{"%.2f"|format(p.price)}} {% if p.old_price %}<del>${{"%.2f"|format(p.old_price)}}</del>{% endif %}</div><div class="stars">★★★★★</div></a><button class="buy" onclick='cart({{p.id|tojson}},{{p.name|tojson}},{{p.price}},{{p.image|tojson}})'>AGREGAR AL CARRITO</button></article>{% endfor %}
+  </div></div>
+</section>
+
+{% for page in pages %}
+<section class="section infoSection" id="{{page.slug}}">
+  <h2>{{page.title}}</h2>
+  {% if page.image %}<div class="pageHero"><img src="{{page.image}}" alt="{{page.title}}"></div>{% endif %}
+  {% if page.content %}<div class="pageContent">{{ page.content|replace('\n','<br>')|safe }}</div>{% endif %}
+  {% if page["items"] %}<div class="contentCards">{% for item in page["items"] %}<article class="contentCard">{% if item.image %}<img src="{{item.image}}" alt="{{item.title}}">{% endif %}<div><h3>{{item.title}}</h3>{% if item.description %}<p>{{item.description|replace('\n','<br>')|safe}}</p>{% endif %}</div></article>{% endfor %}</div>{% endif %}
+</section>
+{% endfor %}
+
+<footer><div>▣ <b>Almacenes Anderson</b><small>Tu tienda de confianza</small></div><div>✓ <b>Compra segura</b><small>Protegemos tus datos</small></div><div>☎ <b>Atención</b><small>Estamos para ayudarte</small></div></footer>
+<div class="modal" id="modal"><div id="modalBox"></div></div>
+<script src="{{ url_for('static',filename='script.js') }}"></script>
+</body></html>

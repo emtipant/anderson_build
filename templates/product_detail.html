@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{p.name}} - Almacenes Anderson</title>
+<link rel="stylesheet" href="{{ url_for('static',filename='style.css') }}">
+</head>
+<body>
+<header>
+  <div class="mini">{{mini_text}}</div>
+  <div class="bar">
+    <a class="logo" href="/">{% if logo %}<img src="{{logo}}" alt="Logo de la tienda">{% else %}<span>Anderson</span><small>ALMACENES</small>{% endif %}</a>
+    <div class="search"><input placeholder="Buscar productos, categorías o marcas..." disabled><button>⌕</button></div>
+    <div class="icons"><a href="/">⌂<small>Inicio</small></a><a href="/login">◯<small>Mi cuenta</small></a></div>
+  </div>
+</header>
+<main class="productDetailPage">
+  <a class="backLink" href="/">← Volver a productos</a>
+  <section class="productDetail">
+    <div class="detailGallery">
+      <div class="detailMainImage"><img id="detailMainImage" src="{{p.gallery[0]}}" alt="{{p.name}}"></div>
+      {% if p.gallery|length > 1 %}<div class="detailThumbs">{% for image in p.gallery %}<button class="detailThumb {% if loop.first %}active{% endif %}" onclick="changeDetailImage({{image|tojson}},this)"><img src="{{image}}" alt="{{p.name}}"></button>{% endfor %}</div>{% endif %}
+    </div>
+    <div class="detailInfo">
+      <small class="detailCategory">{{p.category}}</small>
+      <h1>{{p.name}}</h1>
+      <div class="detailStars">★★★★★ <span>Producto destacado</span></div>
+      <div class="detailPrice">${{"%.2f"|format(p.price)}} {% if p.old_price %}<del>${{"%.2f"|format(p.old_price)}}</del>{% endif %}</div>
+      <p class="detailShort">{{p.description or 'Producto de calidad disponible en Almacenes Anderson.'}}</p>
+      {% if p.colors_list %}<div class="colorBox"><h3>Colores disponibles</h3><div class="colorOptions">{% for color in p.colors_list %}<button class="colorOption" title="{{color}}" onclick="selectColor(this)"><span style="background:{{color}}"></span>{{color}}</button>{% endfor %}</div></div>{% endif %}
+      <div class="stockBox">{% if p.stock > 0 %}✓ Disponible · Stock: {{p.stock}}{% else %}Agotado{% endif %}</div>
+      {% if p.stock > 0 %}<button class="detailBuy" onclick='cart({{p.id|tojson}},{{p.name|tojson}},{{p.price}},{{p.image|tojson}})'>AGREGAR AL CARRITO</button>{% endif %}
+    </div>
+  </section>
+  <section class="detailDescription"><h2>Información del producto</h2>{% if p.details %}<div>{{p.details|replace('\n','<br>')|safe}}</div>{% else %}<div>{{p.description or 'Consulta con Almacenes Anderson para conocer más características de este producto.'}}</div>{% endif %}</section>
+</main>
+<footer class="detailFooter">{% if logo %}<img src="{{logo}}" alt="Logo de Almacenes Anderson">{% else %}<b>Almacenes Anderson</b>{% endif %}<small>© Almacenes Anderson</small></footer>
+<div class="modal" id="modal"><div id="modalBox"></div></div>
+<script src="{{ url_for('static',filename='script.js') }}"></script>
+<script>
+function changeDetailImage(src,btn){document.getElementById('detailMainImage').src=src;document.querySelectorAll('.detailThumb').forEach(x=>x.classList.remove('active'));btn.classList.add('active')}
+function selectColor(btn){document.querySelectorAll('.colorOption').forEach(x=>x.classList.remove('selected'));btn.classList.add('selected')}
+</script>
+</body></html>
