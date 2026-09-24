@@ -1,472 +1,2496 @@
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash
 from werkzeug.utils import secure_filename
-import sqlite3, os, uuid, json, re
+from dotenv import load_dotenv
+from supabase import create_client
+import psycopg
+from psycopg.rows import dict_row
+import os
+import uuid
+import json
+import re
+import mimetypes
+
+# ============================================================
+# ALMACENES ANDERSON - Flask + PostgreSQL (Supabase) + Storage
+# ============================================================
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(BASE, "anderson.db")
-UPLOAD = os.path.join(BASE, "static", "uploads")
-os.makedirs(UPLOAD, exist_ok=True)
+load_dotenv(os.path.join(BASE, ".env"))
+
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    or os.getenv("SUPABASE_KEY", "").strip()
+)
+
+STORAGE_BUCKET = "imagenes"
+
+if not DATABASE_URL:
+    raise RuntimeError("Falta DATABASE_URL en el archivo .env")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError(
+        "Faltan SUPABASE_URL y SUPABASE_KEY/SUPABASE_SECRET_KEY en el archivo .env"
+    )
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = Flask(__name__)
-app.secret_key = "cambia-esta-clave-en-produccion"
+app.secret_key = os.getenv(
+    "FLASK_SECRET_KEY",
+    "cambia-esta-clave-en-produccion"
+)
+
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
-ALLOWED = {"png", "jpg", "jpeg", "webp", "gif", "svg"}
+
+ALLOWED = {
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "gif",
+    "svg"
+}
+
+
+# ============================================================
+# BASE DE DATOS
+# ============================================================
+
+class DB:
+
+    def __init__(self):
+        self.con = psycopg.connect(
+            DATABASE_URL,
+            row_factory=dict_row
+        )
+
+    def execute(self, sql, params=()):
+        return self.con.execute(sql, params)
+
+    def executescript(self, script):
+        for statement in script.split(";"):
+            statement = statement.strip()
+
+            if statement:
+                self.con.execute(statement)
+
+    # CORREGIDO
+    def executemany(self, sql, params_seq):
+        with self.con.cursor() as cur:
+            cur.executemany(sql, params_seq)
+
+    def rollback(self):
+        return self.con.rollback()
+
+    def commit(self):
+        return self.con.commit()
+
+    def close(self):
+        return self.con.close()
 
 
 def db():
-    con = sqlite3.connect(DB)
-    con.row_factory = sqlite3.Row
-    return con
+    return DB()
 
+
+# ============================================================
+# INICIALIZAR BASE DE DATOS
+# ============================================================
 
 def init_db():
+
     con = db()
-    con.executescript("""
-    CREATE TABLE IF NOT EXISTS products(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL, description TEXT, category TEXT NOT NULL,
-      price REAL NOT NULL, old_price REAL DEFAULT 0, stock INTEGER DEFAULT 0,
-      image TEXT NOT NULL, active INTEGER DEFAULT 1
-    );
-    CREATE TABLE IF NOT EXISTS carousel(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, image TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE IF NOT EXISTS nav_items(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, url TEXT NOT NULL,
-      sort_order INTEGER DEFAULT 0, active INTEGER DEFAULT 1
-    );
-    CREATE TABLE IF NOT EXISTS categories(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, image TEXT DEFAULT '',
-      sort_order INTEGER DEFAULT 0, active INTEGER DEFAULT 1
-    );
-    CREATE TABLE IF NOT EXISTS pages(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE NOT NULL,
-      title TEXT NOT NULL, content TEXT DEFAULT '', image TEXT DEFAULT '',
-      sort_order INTEGER DEFAULT 0, active INTEGER DEFAULT 1
-    );
-    CREATE TABLE IF NOT EXISTS page_items(
-      id INTEGER PRIMARY KEY AUTOINCREMENT, page_id INTEGER NOT NULL,
-      title TEXT NOT NULL, description TEXT DEFAULT '', image TEXT DEFAULT '',
-      sort_order INTEGER DEFAULT 0, active INTEGER DEFAULT 1,
-      FOREIGN KEY(page_id) REFERENCES pages(id) ON DELETE CASCADE
-    );
-    """)
 
-    # Compatibilidad con bases creadas por versiones anteriores.
-    cols = [r[1] for r in con.execute("PRAGMA table_info(pages)").fetchall()]
-    if "image" not in cols:
-        con.execute("ALTER TABLE pages ADD COLUMN image TEXT DEFAULT ''")
+    try:
 
-    # Campos adicionales de productos para la ficha detallada.
-    product_cols = [r[1] for r in con.execute("PRAGMA table_info(products)").fetchall()]
-    if "details" not in product_cols:
-        con.execute("ALTER TABLE products ADD COLUMN details TEXT DEFAULT ''")
-    if "colors" not in product_cols:
-        con.execute("ALTER TABLE products ADD COLUMN colors TEXT DEFAULT ''")
-    if "gallery" not in product_cols:
-        con.execute("ALTER TABLE products ADD COLUMN gallery TEXT DEFAULT '[]'")
+        con.executescript("""
+        CREATE TABLE IF NOT EXISTS products(
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            category TEXT NOT NULL,
+            price DOUBLE PRECISION NOT NULL,
+            old_price DOUBLE PRECISION DEFAULT 0,
+            stock INTEGER DEFAULT 0,
+            image TEXT NOT NULL,
+            active INTEGER DEFAULT 1,
+            details TEXT DEFAULT '',
+            colors TEXT DEFAULT '',
+            gallery TEXT DEFAULT '[]'
+        );
 
-    if con.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
-        demo = [
-          ("Refrigeradora 390L", "Refrigeradora de gran capacidad", "Electrodomésticos", 899, 0, 8, "https://images.unsplash.com/photo-1584568694244-14fbdf83bd30?auto=format&fit=crop&w=600&q=80"),
-          ('Televisor Smart TV 55"', "Smart TV de alta definición", "Tecnología", 599, 0, 15, "https://images.unsplash.com/photo-1593784991095-a205069470b6?auto=format&fit=crop&w=600&q=80"),
-          ("Lavadora 18kg", "Lavadora de carga superior", "Electrodomésticos", 649, 699, 12, "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&w=600&q=80"),
-          ("Laptop HP 15.6", "Laptop para trabajo y estudio", "Tecnología", 669, 699, 20, "https://images.unsplash.com/photo-1496181133206-80ce9b88a853?auto=format&fit=crop&w=600&q=80"),
-          ("Moto Shineray XY200", "Motocicleta urbana", "Motos", 1399, 0, 8, "https://images.unsplash.com/photo-1558981806-ec527fa84c39?auto=format&fit=crop&w=600&q=80"),
-          ("Parlante JBL PartyBox 110", "Parlante Bluetooth", "Audio y Video", 399, 0, 15, "https://images.unsplash.com/photo-1545454675-3531b543be5d?auto=format&fit=crop&w=600&q=80")
+        CREATE TABLE IF NOT EXISTS carousel(
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            kind TEXT NOT NULL,
+            image TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS settings(
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS nav_items(
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            label TEXT NOT NULL,
+            url TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS categories(
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            image TEXT DEFAULT '',
+            sort_order INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS pages(
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            slug TEXT UNIQUE NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT DEFAULT '',
+            image TEXT DEFAULT '',
+            sort_order INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS page_items(
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            page_id INTEGER NOT NULL
+                REFERENCES pages(id)
+                ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            image TEXT DEFAULT '',
+            sort_order INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1
+        );
+        """)
+
+        # ----------------------------------------------------
+        # Comprobar columnas de productos
+        # ----------------------------------------------------
+
+        product_cols = {
+            r["column_name"]
+            for r in con.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema='public'
+                AND table_name='products'
+            """).fetchall()
+        }
+
+        if "details" not in product_cols:
+            con.execute(
+                "ALTER TABLE products ADD COLUMN details TEXT DEFAULT ''"
+            )
+
+        if "colors" not in product_cols:
+            con.execute(
+                "ALTER TABLE products ADD COLUMN colors TEXT DEFAULT ''"
+            )
+
+        if "gallery" not in product_cols:
+            con.execute(
+                "ALTER TABLE products ADD COLUMN gallery TEXT DEFAULT '[]'"
+            )
+
+        # ----------------------------------------------------
+        # Productos de demostración
+        # ----------------------------------------------------
+
+        count_products = con.execute(
+            "SELECT COUNT(*) AS n FROM products"
+        ).fetchone()["n"]
+
+        if count_products == 0:
+
+            demo = [
+
+                (
+                    "Refrigeradora 390L",
+                    "Refrigeradora de gran capacidad",
+                    "Electrodomésticos",
+                    899,
+                    0,
+                    8,
+                    "https://images.unsplash.com/photo-1584568694244-14fbdf83bd30?auto=format&fit=crop&w=600&q=80"
+                ),
+
+                (
+                    'Televisor Smart TV 55"',
+                    "Smart TV de alta definición",
+                    "Tecnología",
+                    599,
+                    0,
+                    15,
+                    "https://images.unsplash.com/photo-1593784991095-a205069470b6?auto=format&fit=crop&w=600&q=80"
+                ),
+
+                (
+                    "Lavadora 18kg",
+                    "Lavadora de carga superior",
+                    "Electrodomésticos",
+                    649,
+                    699,
+                    12,
+                    "https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?auto=format&fit=crop&w=600&q=80"
+                ),
+
+                (
+                    "Laptop HP 15.6",
+                    "Laptop para trabajo y estudio",
+                    "Tecnología",
+                    669,
+                    699,
+                    20,
+                    "https://images.unsplash.com/photo-1496181133206-80ce9b88a853?auto=format&fit=crop&w=600&q=80"
+                ),
+
+                (
+                    "Moto Shineray XY200",
+                    "Motocicleta urbana",
+                    "Motos",
+                    1399,
+                    0,
+                    8,
+                    "https://images.unsplash.com/photo-1558981806-ec527fa84c39?auto=format&fit=crop&w=600&q=80"
+                ),
+
+                (
+                    "Parlante JBL PartyBox 110",
+                    "Parlante Bluetooth",
+                    "Audio y Video",
+                    399,
+                    0,
+                    15,
+                    "https://images.unsplash.com/photo-1545454675-3531b543be5d?auto=format&fit=crop&w=600&q=80"
+                )
+            ]
+
+            con.executemany("""
+                INSERT INTO products(
+                    name,
+                    description,
+                    category,
+                    price,
+                    old_price,
+                    stock,
+                    image
+                )
+                VALUES(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+            """, demo)
+
+        # ----------------------------------------------------
+        # Carrusel
+        # ----------------------------------------------------
+
+        count_carousel = con.execute(
+            "SELECT COUNT(*) AS n FROM carousel"
+        ).fetchone()["n"]
+
+        if count_carousel == 0:
+
+            hero = [
+
+                "https://images.unsplash.com/photo-1556740749-887f6717d7e4?auto=format&fit=crop&w=1600&q=85",
+
+                "https://images.unsplash.com/photo-1607082349566-187342175e2f?auto=format&fit=crop&w=1600&q=85",
+
+                "https://images.unsplash.com/photo-1472851294608-062f824d29cc?auto=format&fit=crop&w=1600&q=85"
+            ]
+
+            offers = [
+
+                "https://images.unsplash.com/photo-1607083206968-13611e3d76db?auto=format&fit=crop&w=1600&q=85",
+
+                "https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?auto=format&fit=crop&w=1600&q=85"
+            ]
+
+            for x in hero:
+
+                con.execute(
+                    """
+                    INSERT INTO carousel(kind,image)
+                    VALUES(%s,%s)
+                    """,
+                    ("hero", x)
+                )
+
+            for x in offers:
+
+                con.execute(
+                    """
+                    INSERT INTO carousel(kind,image)
+                    VALUES(%s,%s)
+                    """,
+                    ("offer", x)
+                )
+
+        # ----------------------------------------------------
+        # Configuración
+        # ----------------------------------------------------
+
+        defaults = [
+
+            (
+                "logo",
+                ""
+            ),
+
+            (
+                "mini_text",
+                "🚚 Envío nacional | 🛡 Compra 100% segura | ✓ Garantía Anderson"
+            )
         ]
-        con.executemany("INSERT INTO products(name,description,category,price,old_price,stock,image) VALUES(?,?,?,?,?,?,?)", demo)
 
-    if con.execute("SELECT COUNT(*) FROM carousel").fetchone()[0] == 0:
-        hero = [
-          "https://images.unsplash.com/photo-1556740749-887f6717d7e4?auto=format&fit=crop&w=1600&q=85",
-          "https://images.unsplash.com/photo-1607082349566-187342175e2f?auto=format&fit=crop&w=1600&q=85",
-          "https://images.unsplash.com/photo-1472851294608-062f824d29cc?auto=format&fit=crop&w=1600&q=85"
+        for k, v in defaults:
+
+            con.execute(
+                """
+                INSERT INTO settings(key,value)
+                VALUES(%s,%s)
+                ON CONFLICT(key) DO NOTHING
+                """,
+                (k, v)
+            )
+
+        # ----------------------------------------------------
+        # Menú
+        # ----------------------------------------------------
+
+        count_nav = con.execute(
+            "SELECT COUNT(*) AS n FROM nav_items"
+        ).fetchone()["n"]
+
+        if count_nav == 0:
+
+            nav = [
+
+                ("Inicio", "/", 1),
+
+                ("Ofertas", "#ofertas", 2),
+
+                ("Productos", "#productos", 3),
+
+                ("Marcas", "#marcas", 4),
+
+                ("Novedades", "#novedades", 5),
+
+                ("Servicios", "#servicios", 6),
+
+                ("Nosotros", "#nosotros", 7),
+
+                ("Contacto", "#contacto", 8)
+            ]
+
+            con.executemany(
+                """
+                INSERT INTO nav_items(
+                    label,
+                    url,
+                    sort_order
+                )
+                VALUES(%s,%s,%s)
+                """,
+                nav
+            )
+
+        # ----------------------------------------------------
+        # Categorías
+        # ----------------------------------------------------
+
+        default_categories = [
+
+            ("Electrodomésticos", "", 1),
+
+            ("Tecnología", "", 2),
+
+            ("Motos", "", 3),
+
+            ("Hogar", "", 4),
+
+            ("Audio y Video", "", 5),
+
+            ("Herramientas", "", 6),
+
+            ("Celulares", "", 7),
+
+            ("Deportes", "", 8)
         ]
-        offers = [
-          "https://images.unsplash.com/photo-1607083206968-13611e3d76db?auto=format&fit=crop&w=1600&q=85",
-          "https://images.unsplash.com/photo-1555529669-e69e7aa0ba9a?auto=format&fit=crop&w=1600&q=85"
+
+        count_categories = con.execute(
+            "SELECT COUNT(*) AS n FROM categories"
+        ).fetchone()["n"]
+
+        if count_categories == 0:
+
+            con.executemany(
+                """
+                INSERT INTO categories(
+                    name,
+                    image,
+                    sort_order
+                )
+                VALUES(%s,%s,%s)
+                """,
+                default_categories
+            )
+
+        # ----------------------------------------------------
+        # Páginas
+        # ----------------------------------------------------
+
+        default_pages = [
+
+            (
+                "novedades",
+                "NOVEDADES",
+                "Aquí puedes publicar novedades, promociones, lanzamientos y noticias de la tienda.",
+                1
+            ),
+
+            (
+                "servicios",
+                "SERVICIOS",
+                "Agrega todos los servicios que ofrece Almacenes Anderson.",
+                2
+            ),
+
+            (
+                "nosotros",
+                "NOSOTROS",
+                "Escribe aquí la historia, misión, visión y descripción de tu negocio.",
+                3
+            ),
+
+            (
+                "contacto",
+                "CONTACTO",
+                "Agrega teléfonos, WhatsApp, dirección, horarios, correo y cualquier información de contacto.",
+                4
+            )
         ]
-        for x in hero: con.execute("INSERT INTO carousel(kind,image) VALUES('hero',?)", (x,))
-        for x in offers: con.execute("INSERT INTO carousel(kind,image) VALUES('offer',?)", (x,))
 
-    defaults = [
-        ("logo", ""),
-        ("mini_text", "🚚 Envío nacional | 🛡 Compra 100% segura | ✓ Garantía Anderson")
-    ]
-    for k, v in defaults:
-        if not con.execute("SELECT 1 FROM settings WHERE key=?", (k,)).fetchone():
-            con.execute("INSERT INTO settings(key,value) VALUES(?,?)", (k, v))
+        for slug, title, content, order in default_pages:
 
-    if con.execute("SELECT COUNT(*) FROM nav_items").fetchone()[0] == 0:
-        nav = [("Inicio", "/", 1), ("Ofertas", "#ofertas", 2), ("Productos", "#productos", 3),
-               ("Marcas", "#marcas", 4), ("Novedades", "#novedades", 5), ("Servicios", "#servicios", 6),
-               ("Nosotros", "#nosotros", 7), ("Contacto", "#contacto", 8)]
-        con.executemany("INSERT INTO nav_items(label,url,sort_order) VALUES(?,?,?)", nav)
+            con.execute(
+                """
+                INSERT INTO pages(
+                    slug,
+                    title,
+                    content,
+                    sort_order,
+                    image
+                )
+                VALUES(%s,%s,%s,%s,%s)
+                ON CONFLICT(slug) DO NOTHING
+                """,
+                (
+                    slug,
+                    title,
+                    content,
+                    order,
+                    ""
+                )
+            )
 
-    default_categories = [
-        ("Electrodomésticos", "", 1), ("Tecnología", "", 2), ("Motos", "", 3), ("Hogar", "", 4),
-        ("Audio y Video", "", 5), ("Herramientas", "", 6), ("Celulares", "", 7), ("Deportes", "", 8)
-    ]
-    if con.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
-        con.executemany("INSERT INTO categories(name,image,sort_order) VALUES(?,?,?)", default_categories)
+        con.commit()
 
-    default_pages = [
-        ("novedades", "NOVEDADES", "Aquí puedes publicar novedades, promociones, lanzamientos y noticias de la tienda.", 1),
-        ("servicios", "SERVICIOS", "Agrega todos los servicios que ofrece Almacenes Anderson.", 2),
-        ("nosotros", "NOSOTROS", "Escribe aquí la historia, misión, visión y descripción de tu negocio.", 3),
-        ("contacto", "CONTACTO", "Agrega teléfonos, WhatsApp, dirección, horarios, correo y cualquier información de contacto.", 4),
-    ]
-    for slug, title, content, order in default_pages:
-        if not con.execute("SELECT 1 FROM pages WHERE slug=?", (slug,)).fetchone():
-            con.execute("INSERT INTO pages(slug,title,content,sort_order,image) VALUES(?,?,?,?,?)", (slug,title,content,order,""))
+    except Exception:
 
-    con.commit(); con.close()
+        con.rollback()
 
+        raise
+
+    finally:
+
+        con.close()
+
+
+# ============================================================
+# ARCHIVOS
+# ============================================================
 
 def allowed(name):
-    return bool(name and "." in name and name.rsplit(".", 1)[1].lower() in ALLOWED)
+
+    return bool(
+        name
+        and "."
+        in name
+        and name.rsplit(".", 1)[1].lower()
+        in ALLOWED
+    )
 
 
 def save_upload(file):
-    if not file or not file.filename or not allowed(file.filename): return None
-    ext = secure_filename(file.filename).rsplit(".", 1)[1].lower()
+
+    """
+    Sube la imagen a Supabase Storage
+    y devuelve la URL pública.
+    """
+
+    if not file:
+        return None
+
+    if not file.filename:
+        return None
+
+    if not allowed(file.filename):
+        return None
+
+    safe_name = secure_filename(file.filename)
+
+    ext = safe_name.rsplit(".", 1)[1].lower()
+
     filename = f"{uuid.uuid4().hex}.{ext}"
-    file.save(os.path.join(UPLOAD, filename))
-    return f"/static/uploads/{filename}"
+
+    data = file.read()
+
+    if not data:
+        return None
+
+    content_type = (
+        mimetypes.guess_type(file.filename)[0]
+        or "application/octet-stream"
+    )
+
+    try:
+
+        supabase.storage.from_(STORAGE_BUCKET).upload(
+            filename,
+            data,
+            file_options={
+                "content-type": content_type,
+                "upsert": "false"
+            }
+        )
+
+        public_url = (
+            supabase
+            .storage
+            .from_(STORAGE_BUCKET)
+            .get_public_url(filename)
+        )
+
+        return public_url
+
+    except Exception as e:
+
+        print(
+            f"ERROR SUBIENDO IMAGEN A SUPABASE: {e}"
+        )
+
+        flash(
+            "No se pudo subir la imagen a Supabase Storage."
+        )
+
+        return None
+
+
+def storage_path(path):
+
+    if not path:
+        return None
+
+    if not isinstance(path, str):
+        return None
+
+    marker = (
+        f"/storage/v1/object/public/"
+        f"{STORAGE_BUCKET}/"
+    )
+
+    if marker in path:
+
+        return (
+            path
+            .split(marker, 1)[1]
+            .split("?", 1)[0]
+        )
+
+    return None
 
 
 def save_uploads(files):
+
     saved = []
+
     for f in files or []:
+
         image = save_upload(f)
+
         if image:
             saved.append(image)
+
     return saved
 
 
 def product_gallery(row):
+
     try:
-        gallery = json.loads(row["gallery"] or "[]")
+
+        gallery = json.loads(
+            row["gallery"] or "[]"
+        )
+
         if not isinstance(gallery, list):
             gallery = []
-    except (TypeError, json.JSONDecodeError):
+
+    except (
+        TypeError,
+        json.JSONDecodeError
+    ):
+
         gallery = []
+
     main = row["image"]
-    return [main] + [x for x in gallery if x and x != main]
+
+    return [
+        main
+    ] + [
+        x
+        for x in gallery
+        if x and x != main
+    ]
 
 
 def delete_local_file(path):
-    if not path or not path.startswith("/static/uploads/"): return
-    full = os.path.join(BASE, path.lstrip("/"))
-    if os.path.isfile(full):
-        try: os.remove(full)
-        except OSError: pass
 
+    """
+    Mantiene el nombre original de la función.
+    Ahora elimina desde Supabase Storage.
+    """
+
+    object_path = storage_path(path)
+
+    if not object_path:
+        return
+
+    try:
+
+        supabase.storage.from_(
+            STORAGE_BUCKET
+        ).remove(
+            [object_path]
+        )
+
+    except Exception as e:
+
+        print(
+            "AVISO: no se pudo eliminar "
+            f"imagen de Storage: {e}"
+        )
+
+
+# ============================================================
+# FUNCIONES AUXILIARES
+# ============================================================
 
 def settings_dict(con):
-    return {r["key"]: r["value"] for r in con.execute("SELECT key,value FROM settings").fetchall()}
+
+    rows = con.execute(
+        "SELECT key,value FROM settings"
+    ).fetchall()
+
+    return {
+        r["key"]: r["value"]
+        for r in rows
+    }
 
 
 def page_data(con):
-    pages = con.execute("SELECT * FROM pages WHERE active=1 ORDER BY sort_order,id").fetchall()
+
+    pages = con.execute(
+        """
+        SELECT *
+        FROM pages
+        WHERE active=1
+        ORDER BY sort_order,id
+        """
+    ).fetchall()
+
     result = []
+
     for p in pages:
+
         d = dict(p)
-        d["items"] = [dict(x) for x in con.execute("SELECT * FROM page_items WHERE page_id=? AND active=1 ORDER BY sort_order,id", (p["id"],)).fetchall()]
+
+        d["items"] = [
+
+            dict(x)
+
+            for x in con.execute(
+                """
+                SELECT *
+                FROM page_items
+                WHERE page_id=%s
+                AND active=1
+                ORDER BY sort_order,id
+                """,
+                (p["id"],)
+            ).fetchall()
+        ]
+
         result.append(d)
+
     return result
 
 
+# ============================================================
+# INICIO
+# ============================================================
+
 @app.route("/")
 def index():
-    con = db()
-    products = con.execute("SELECT * FROM products WHERE active=1 ORDER BY id DESC").fetchall()
-    hero = con.execute("SELECT * FROM carousel WHERE kind='hero' ORDER BY id").fetchall()
-    offers = con.execute("SELECT * FROM carousel WHERE kind='offer' ORDER BY id").fetchall()
-    nav = con.execute("SELECT * FROM nav_items WHERE active=1 ORDER BY sort_order,id").fetchall()
-    categories = con.execute("SELECT * FROM categories WHERE active=1 ORDER BY sort_order,id").fetchall()
-    pages = page_data(con)
-    settings = settings_dict(con); con.close()
-    return render_template("index.html", products=products, hero=hero, offers=offers, nav=nav, categories=categories, pages=pages,
-                           logo=settings.get("logo", ""), mini_text=settings.get("mini_text", ""))
 
+    con = db()
+
+    products = con.execute(
+        """
+        SELECT *
+        FROM products
+        WHERE active=1
+        ORDER BY id DESC
+        """
+    ).fetchall()
+
+    hero = con.execute(
+        """
+        SELECT *
+        FROM carousel
+        WHERE kind='hero'
+        ORDER BY id
+        """
+    ).fetchall()
+
+    offers = con.execute(
+        """
+        SELECT *
+        FROM carousel
+        WHERE kind='offer'
+        ORDER BY id
+        """
+    ).fetchall()
+
+    nav = con.execute(
+        """
+        SELECT *
+        FROM nav_items
+        WHERE active=1
+        ORDER BY sort_order,id
+        """
+    ).fetchall()
+
+    categories = con.execute(
+        """
+        SELECT *
+        FROM categories
+        WHERE active=1
+        ORDER BY sort_order,id
+        """
+    ).fetchall()
+
+    pages = page_data(con)
+
+    settings = settings_dict(con)
+
+    con.close()
+
+    return render_template(
+        "index.html",
+        products=products,
+        hero=hero,
+        offers=offers,
+        nav=nav,
+        categories=categories,
+        pages=pages,
+        logo=settings.get("logo", ""),
+        mini_text=settings.get("mini_text", "")
+    )
+
+
+# ============================================================
+# DETALLE DE PRODUCTO
+# ============================================================
 
 @app.route("/producto/<int:pid>")
 def product_detail(pid):
+
     con = db()
-    product = con.execute("SELECT * FROM products WHERE id=? AND active=1", (pid,)).fetchone()
-    con.close()
+
+    product = con.execute(
+        """
+        SELECT *
+        FROM products
+        WHERE id=%s
+        AND active=1
+        """,
+        (pid,)
+    ).fetchone()
+
     if not product:
-        return "Producto no encontrado", 404
+
+        con.close()
+
+        return (
+            "Producto no encontrado",
+            404
+        )
+
     p = dict(product)
-    p["gallery"] = product_gallery(product)
-    p["colors_list"] = [x.strip() for x in re.split(r"[,\n]", p.get("colors", "")) if x.strip()]
-    con = db(); settings = settings_dict(con); con.close()
-    return render_template("product_detail.html", p=p, logo=settings.get("logo", ""), mini_text=settings.get("mini_text", ""))
+
+    p["gallery"] = product_gallery(
+        product
+    )
+
+    p["colors_list"] = [
+        x.strip()
+        for x in re.split(
+            r"[,\n]",
+            p.get("colors", "")
+        )
+        if x.strip()
+    ]
+
+    settings = settings_dict(con)
+
+    con.close()
+
+    return render_template(
+        "product_detail.html",
+        p=p,
+        logo=settings.get("logo", ""),
+        mini_text=settings.get(
+            "mini_text",
+            ""
+        )
+    )
 
 
-@app.route("/login", methods=["GET", "POST"])
+# ============================================================
+# LOGIN
+# ============================================================
+
+@app.route(
+    "/login",
+    methods=["GET", "POST"]
+)
 def login():
-    if request.method == "POST":
-        if request.form.get("user") == "propietario" and request.form.get("password") == "anderson123":
-            session["admin"] = True; return redirect(url_for("admin"))
-        flash("Usuario o contraseña incorrectos.")
-    con = db(); settings = settings_dict(con); con.close()
-    return render_template("login.html", logo=settings.get("logo", ""))
 
+    if request.method == "POST":
+
+        if (
+            request.form.get("user")
+            == "propietario"
+            and
+            request.form.get("password")
+            == "anderson123"
+        ):
+
+            session["admin"] = True
+
+            return redirect(
+                url_for("admin")
+            )
+
+        flash(
+            "Usuario o contraseña incorrectos."
+        )
+
+    con = db()
+
+    settings = settings_dict(con)
+
+    con.close()
+
+    return render_template(
+        "login.html",
+        logo=settings.get("logo", "")
+    )
+
+
+# ============================================================
+# ADMIN
+# ============================================================
 
 @app.route("/admin")
 def admin():
-    if not session.get("admin"): return redirect(url_for("login"))
-    con = db()
-    products = con.execute("SELECT * FROM products ORDER BY id DESC").fetchall()
-    hero = con.execute("SELECT * FROM carousel WHERE kind='hero' ORDER BY id").fetchall()
-    offers = con.execute("SELECT * FROM carousel WHERE kind='offer' ORDER BY id").fetchall()
-    nav = con.execute("SELECT * FROM nav_items ORDER BY sort_order,id").fetchall()
-    categories = con.execute("SELECT * FROM categories ORDER BY sort_order,id").fetchall()
-    pages = [dict(p, items=[dict(x) for x in con.execute("SELECT * FROM page_items WHERE page_id=? ORDER BY sort_order,id", (p["id"],)).fetchall()]) for p in con.execute("SELECT * FROM pages ORDER BY sort_order,id").fetchall()]
-    settings = settings_dict(con); con.close()
-    return render_template("admin.html", products=products, hero=hero, offers=offers, nav=nav, categories=categories, pages=pages,
-                           logo=settings.get("logo", ""), mini_text=settings.get("mini_text", ""))
 
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    products = con.execute(
+        """
+        SELECT *
+        FROM products
+        ORDER BY id DESC
+        """
+    ).fetchall()
+
+    hero = con.execute(
+        """
+        SELECT *
+        FROM carousel
+        WHERE kind='hero'
+        ORDER BY id
+        """
+    ).fetchall()
+
+    offers = con.execute(
+        """
+        SELECT *
+        FROM carousel
+        WHERE kind='offer'
+        ORDER BY id
+        """
+    ).fetchall()
+
+    nav = con.execute(
+        """
+        SELECT *
+        FROM nav_items
+        ORDER BY sort_order,id
+        """
+    ).fetchall()
+
+    categories = con.execute(
+        """
+        SELECT *
+        FROM categories
+        ORDER BY sort_order,id
+        """
+    ).fetchall()
+
+    pages = []
+
+    for p in con.execute(
+        """
+        SELECT *
+        FROM pages
+        ORDER BY sort_order,id
+        """
+    ).fetchall():
+
+        page = dict(p)
+
+        page["items"] = [
+
+            dict(x)
+
+            for x in con.execute(
+                """
+                SELECT *
+                FROM page_items
+                WHERE page_id=%s
+                ORDER BY sort_order,id
+                """,
+                (p["id"],)
+            ).fetchall()
+        ]
+
+        pages.append(page)
+
+    settings = settings_dict(con)
+
+    con.close()
+
+    return render_template(
+        "admin.html",
+        products=products,
+        hero=hero,
+        offers=offers,
+        nav=nav,
+        categories=categories,
+        pages=pages,
+        logo=settings.get("logo", ""),
+        mini_text=settings.get("mini_text", "")
+    )
+
+
+# ============================================================
+# PRODUCTOS
+# ============================================================
 
 @app.post("/admin/product/add")
 def add_product():
-    if not session.get("admin"): return redirect(url_for("login"))
-    image = save_upload(request.files.get("image"))
-    gallery = save_uploads(request.files.getlist("gallery"))
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    image = save_upload(
+        request.files.get("image")
+    )
+
+    gallery = save_uploads(
+        request.files.getlist("gallery")
+    )
+
     if not image:
-        for x in gallery: delete_local_file(x)
-        flash("Selecciona una imagen principal JPG, PNG, WEBP, GIF o SVG.")
-        return redirect(url_for("admin"))
+
+        for x in gallery:
+            delete_local_file(x)
+
+        flash(
+            "Selecciona una imagen principal JPG, PNG, WEBP, GIF o SVG."
+        )
+
+        return redirect(
+            url_for("admin")
+        )
+
     try:
-        price=float(request.form.get("price",0)); old=float(request.form.get("old_price",0) or 0); stock=int(request.form.get("stock",0))
+
+        price = float(
+            request.form.get(
+                "price",
+                0
+            )
+        )
+
+        old = float(
+            request.form.get(
+                "old_price",
+                0
+            )
+            or 0
+        )
+
+        stock = int(
+            request.form.get(
+                "stock",
+                0
+            )
+        )
+
     except ValueError:
+
         delete_local_file(image)
-        for x in gallery: delete_local_file(x)
-        flash("Precio o stock inválido.")
-        return redirect(url_for("admin"))
-    con=db()
-    con.execute("INSERT INTO products(name,description,category,price,old_price,stock,image,details,colors,gallery) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (request.form.get("name","").strip(), request.form.get("description",""), request.form.get("category","General").strip(), price, old, stock, image, request.form.get("details",""), request.form.get("colors",""), json.dumps(gallery)))
-    con.commit(); con.close()
-    return redirect(url_for("admin"))
+
+        for x in gallery:
+            delete_local_file(x)
+
+        flash(
+            "Precio o stock inválido."
+        )
+
+        return redirect(
+            url_for("admin")
+        )
+
+    con = db()
+
+    con.execute(
+        """
+        INSERT INTO products(
+            name,
+            description,
+            category,
+            price,
+            old_price,
+            stock,
+            image,
+            details,
+            colors,
+            gallery
+        )
+        VALUES(
+            %s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s
+        )
+        """,
+        (
+            request.form.get(
+                "name",
+                ""
+            ).strip(),
+
+            request.form.get(
+                "description",
+                ""
+            ),
+
+            request.form.get(
+                "category",
+                "General"
+            ).strip(),
+
+            price,
+            old,
+            stock,
+            image,
+
+            request.form.get(
+                "details",
+                ""
+            ),
+
+            request.form.get(
+                "colors",
+                ""
+            ),
+
+            json.dumps(gallery)
+        )
+    )
+
+    con.commit()
+
+    con.close()
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/product/<int:pid>/edit")
 def edit_product(pid):
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); old=con.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    old = con.execute(
+        """
+        SELECT *
+        FROM products
+        WHERE id=%s
+        """,
+        (pid,)
+    ).fetchone()
+
     if not old:
-        con.close(); return redirect(url_for("admin"))
-    new_image=save_upload(request.files.get("image"))
-    new_gallery=save_uploads(request.files.getlist("gallery"))
+
+        con.close()
+
+        return redirect(
+            url_for("admin")
+        )
+
+    new_image = save_upload(
+        request.files.get("image")
+    )
+
+    new_gallery = save_uploads(
+        request.files.getlist("gallery")
+    )
+
     try:
-        price=float(request.form.get("price",0)); old_price=float(request.form.get("old_price",0) or 0); stock=int(request.form.get("stock",0))
-        current_gallery=json.loads(old["gallery"] or "[]") if old["gallery"] else []
-        if not isinstance(current_gallery,list): current_gallery=[]
-        image=new_image or old["image"]
-        gallery=current_gallery + new_gallery
-        con.execute("""UPDATE products SET name=?,description=?,category=?,price=?,old_price=?,stock=?,image=?,details=?,colors=?,gallery=? WHERE id=?""",
-            (request.form.get("name","").strip(), request.form.get("description",""), request.form.get("category","General").strip(), price, old_price, stock, image, request.form.get("details",""), request.form.get("colors",""), json.dumps(gallery), pid))
+
+        price = float(
+            request.form.get(
+                "price",
+                0
+            )
+        )
+
+        old_price = float(
+            request.form.get(
+                "old_price",
+                0
+            )
+            or 0
+        )
+
+        stock = int(
+            request.form.get(
+                "stock",
+                0
+            )
+        )
+
+        current_gallery = json.loads(
+            old["gallery"] or "[]"
+        )
+
+        if not isinstance(
+            current_gallery,
+            list
+        ):
+            current_gallery = []
+
+        image = (
+            new_image
+            or old["image"]
+        )
+
+        gallery = (
+            current_gallery
+            + new_gallery
+        )
+
+        con.execute(
+            """
+            UPDATE products
+            SET
+                name=%s,
+                description=%s,
+                category=%s,
+                price=%s,
+                old_price=%s,
+                stock=%s,
+                image=%s,
+                details=%s,
+                colors=%s,
+                gallery=%s
+            WHERE id=%s
+            """,
+            (
+                request.form.get(
+                    "name",
+                    ""
+                ).strip(),
+
+                request.form.get(
+                    "description",
+                    ""
+                ),
+
+                request.form.get(
+                    "category",
+                    "General"
+                ).strip(),
+
+                price,
+                old_price,
+                stock,
+                image,
+
+                request.form.get(
+                    "details",
+                    ""
+                ),
+
+                request.form.get(
+                    "colors",
+                    ""
+                ),
+
+                json.dumps(gallery),
+
+                pid
+            )
+        )
+
         con.commit()
-    except (ValueError, json.JSONDecodeError):
-        if new_image: delete_local_file(new_image)
-        for x in new_gallery: delete_local_file(x)
-        flash("Datos del producto inválidos.")
+
+    except (
+        ValueError,
+        json.JSONDecodeError
+    ):
+
+        if new_image:
+            delete_local_file(
+                new_image
+            )
+
+        for x in new_gallery:
+            delete_local_file(x)
+
+        flash(
+            "Datos del producto inválidos."
+        )
+
     con.close()
-    if new_image and old["image"] != new_image: delete_local_file(old["image"])
-    return redirect(url_for("admin"))
 
+    if (
+        new_image
+        and old["image"] != new_image
+    ):
 
-@app.post("/admin/carousel/<kind>/add")
-def add_carousel(kind):
-    if not session.get("admin") or kind not in ("hero","offer"): return redirect(url_for("login"))
-    con=db()
-    for f in request.files.getlist("images"):
-        image=save_upload(f)
-        if image: con.execute("INSERT INTO carousel(kind,image) VALUES(?,?)",(kind,image))
-    con.commit(); con.close(); return redirect(url_for("admin"))
+        delete_local_file(
+            old["image"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/product/<int:pid>/delete")
 def delete_product(pid):
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); row=con.execute("SELECT image,gallery FROM products WHERE id=?",(pid,)).fetchone(); con.execute("DELETE FROM products WHERE id=?",(pid,)); con.commit(); con.close()
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    row = con.execute(
+        """
+        SELECT image,gallery
+        FROM products
+        WHERE id=%s
+        """,
+        (pid,)
+    ).fetchone()
+
+    con.execute(
+        """
+        DELETE FROM products
+        WHERE id=%s
+        """,
+        (pid,)
+    )
+
+    con.commit()
+
+    con.close()
+
     if row:
-        delete_local_file(row["image"])
+
+        delete_local_file(
+            row["image"]
+        )
+
         try:
-            for x in json.loads(row["gallery"] or "[]"):
+
+            gallery = json.loads(
+                row["gallery"] or "[]"
+            )
+
+            for x in gallery:
+
                 delete_local_file(x)
-        except (TypeError, json.JSONDecodeError):
+
+        except (
+            TypeError,
+            json.JSONDecodeError
+        ):
+
             pass
-    return redirect(url_for("admin"))
+
+    return redirect(
+        url_for("admin")
+    )
+
+
+# ============================================================
+# CARRUSEL
+# ============================================================
+
+@app.post("/admin/carousel/<kind>/add")
+def add_carousel(kind):
+
+    if (
+        not session.get("admin")
+        or kind not in (
+            "hero",
+            "offer"
+        )
+    ):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    for f in request.files.getlist(
+        "images"
+    ):
+
+        image = save_upload(f)
+
+        if image:
+
+            con.execute(
+                """
+                INSERT INTO carousel(
+                    kind,
+                    image
+                )
+                VALUES(%s,%s)
+                """,
+                (
+                    kind,
+                    image
+                )
+            )
+
+    con.commit()
+
+    con.close()
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/carousel/<int:cid>/delete")
 def delete_carousel(cid):
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); row=con.execute("SELECT image FROM carousel WHERE id=?",(cid,)).fetchone(); con.execute("DELETE FROM carousel WHERE id=?",(cid,)); con.commit(); con.close()
-    if row: delete_local_file(row["image"])
-    return redirect(url_for("admin"))
 
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    row = con.execute(
+        """
+        SELECT image
+        FROM carousel
+        WHERE id=%s
+        """,
+        (cid,)
+    ).fetchone()
+
+    con.execute(
+        """
+        DELETE FROM carousel
+        WHERE id=%s
+        """,
+        (cid,)
+    )
+
+    con.commit()
+
+    con.close()
+
+    if row:
+
+        delete_local_file(
+            row["image"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
+
+
+# ============================================================
+# LOGO
+# ============================================================
 
 @app.post("/admin/logo")
 def update_logo():
-    if not session.get("admin"): return redirect(url_for("login"))
-    image=save_upload(request.files.get("logo"))
-    if not image: flash("Selecciona el archivo del logo."); return redirect(url_for("admin"))
-    con=db(); old=con.execute("SELECT value FROM settings WHERE key='logo'").fetchone(); con.execute("INSERT INTO settings(key,value) VALUES('logo',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(image,)); con.commit(); con.close()
-    if old: delete_local_file(old[0])
-    return redirect(url_for("admin"))
 
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    image = save_upload(
+        request.files.get("logo")
+    )
+
+    if not image:
+
+        flash(
+            "Selecciona el archivo del logo."
+        )
+
+        return redirect(
+            url_for("admin")
+        )
+
+    con = db()
+
+    old = con.execute(
+        """
+        SELECT value
+        FROM settings
+        WHERE key='logo'
+        """
+    ).fetchone()
+
+    con.execute(
+        """
+        INSERT INTO settings(
+            key,
+            value
+        )
+        VALUES(
+            'logo',
+            %s
+        )
+        ON CONFLICT(key)
+        DO UPDATE SET
+            value=EXCLUDED.value
+        """,
+        (image,)
+    )
+
+    con.commit()
+
+    con.close()
+
+    if old:
+
+        delete_local_file(
+            old["value"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
+
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
 
 @app.post("/admin/settings")
 def update_settings():
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); con.execute("INSERT INTO settings(key,value) VALUES('mini_text',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(request.form.get("mini_text","").strip(),)); con.commit(); con.close(); return redirect(url_for("admin"))
 
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    con.execute(
+        """
+        INSERT INTO settings(
+            key,
+            value
+        )
+        VALUES(
+            'mini_text',
+            %s
+        )
+        ON CONFLICT(key)
+        DO UPDATE SET
+            value=EXCLUDED.value
+        """,
+        (
+            request.form.get(
+                "mini_text",
+                ""
+            ).strip(),
+        )
+    )
+
+    con.commit()
+
+    con.close()
+
+    return redirect(
+        url_for("admin")
+    )
+
+
+# ============================================================
+# MENÚ
+# ============================================================
 
 @app.post("/admin/nav/add")
 def add_nav():
-    if not session.get("admin"): return redirect(url_for("login"))
-    label=request.form.get("label","").strip(); target=request.form.get("url","").strip()
-    if not label or not target: flash("Escribe el nombre y el enlace del menú."); return redirect(url_for("admin"))
-    con=db(); order=con.execute("SELECT COALESCE(MAX(sort_order),0) FROM nav_items").fetchone()[0]; con.execute("INSERT INTO nav_items(label,url,sort_order) VALUES(?,?,?)",(label,target,order+1)); con.commit(); con.close(); return redirect(url_for("admin"))
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    label = request.form.get(
+        "label",
+        ""
+    ).strip()
+
+    target = request.form.get(
+        "url",
+        ""
+    ).strip()
+
+    if not label or not target:
+
+        flash(
+            "Escribe el nombre y el enlace del menú."
+        )
+
+        return redirect(
+            url_for("admin")
+        )
+
+    con = db()
+
+    order = con.execute(
+        """
+        SELECT COALESCE(
+            MAX(sort_order),
+            0
+        ) AS n
+        FROM nav_items
+        """
+    ).fetchone()["n"]
+
+    con.execute(
+        """
+        INSERT INTO nav_items(
+            label,
+            url,
+            sort_order
+        )
+        VALUES(%s,%s,%s)
+        """,
+        (
+            label,
+            target,
+            order + 1
+        )
+    )
+
+    con.commit()
+
+    con.close()
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/nav/<int:nid>/delete")
 def delete_nav(nid):
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); con.execute("DELETE FROM nav_items WHERE id=?",(nid,)); con.commit(); con.close(); return redirect(url_for("admin"))
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    con.execute(
+        """
+        DELETE FROM nav_items
+        WHERE id=%s
+        """,
+        (nid,)
+    )
+
+    con.commit()
+
+    con.close()
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/nav/<int:nid>/edit")
 def edit_nav(nid):
-    if not session.get("admin"): return redirect(url_for("login"))
-    label=request.form.get("label","").strip(); target=request.form.get("url","").strip()
-    if label and target:
-        con=db(); con.execute("UPDATE nav_items SET label=?,url=? WHERE id=?",(label,target,nid)); con.commit(); con.close()
-    return redirect(url_for("admin"))
 
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    label = request.form.get(
+        "label",
+        ""
+    ).strip()
+
+    target = request.form.get(
+        "url",
+        ""
+    ).strip()
+
+    if label and target:
+
+        con = db()
+
+        con.execute(
+            """
+            UPDATE nav_items
+            SET
+                label=%s,
+                url=%s
+            WHERE id=%s
+            """,
+            (
+                label,
+                target,
+                nid
+            )
+        )
+
+        con.commit()
+
+        con.close()
+
+    return redirect(
+        url_for("admin")
+    )
+
+
+# ============================================================
+# CATEGORÍAS
+# ============================================================
 
 @app.post("/admin/category/add")
 def add_category():
-    if not session.get("admin"): return redirect(url_for("login"))
-    name=request.form.get("name","").strip(); image=save_upload(request.files.get("image"))
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    name = request.form.get(
+        "name",
+        ""
+    ).strip()
+
+    image = save_upload(
+        request.files.get("image")
+    )
+
     if not name:
-        delete_local_file(image); flash("Escribe el nombre de la categoría."); return redirect(url_for("admin"))
-    con=db()
+
+        delete_local_file(image)
+
+        flash(
+            "Escribe el nombre de la categoría."
+        )
+
+        return redirect(
+            url_for("admin")
+        )
+
+    con = db()
+
     try:
-        order=con.execute("SELECT COALESCE(MAX(sort_order),0) FROM categories").fetchone()[0]
-        con.execute("INSERT INTO categories(name,image,sort_order) VALUES(?,?,?)",(name,image or "",order+1)); con.commit()
-    except sqlite3.IntegrityError:
-        delete_local_file(image); flash("Esa categoría ya existe.")
-    con.close(); return redirect(url_for("admin"))
+
+        order = con.execute(
+            """
+            SELECT COALESCE(
+                MAX(sort_order),
+                0
+            ) AS n
+            FROM categories
+            """
+        ).fetchone()["n"]
+
+        con.execute(
+            """
+            INSERT INTO categories(
+                name,
+                image,
+                sort_order
+            )
+            VALUES(%s,%s,%s)
+            """,
+            (
+                name,
+                image or "",
+                order + 1
+            )
+        )
+
+        con.commit()
+
+    except psycopg.errors.UniqueViolation:
+
+        con.rollback()
+
+        delete_local_file(image)
+
+        flash(
+            "Esa categoría ya existe."
+        )
+
+    con.close()
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/category/<int:cid>/edit")
 def edit_category(cid):
-    if not session.get("admin"): return redirect(url_for("login"))
-    name=request.form.get("name","").strip()
-    con=db(); old=con.execute("SELECT * FROM categories WHERE id=?",(cid,)).fetchone()
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    name = request.form.get(
+        "name",
+        ""
+    ).strip()
+
+    con = db()
+
+    old = con.execute(
+        """
+        SELECT *
+        FROM categories
+        WHERE id=%s
+        """,
+        (cid,)
+    ).fetchone()
+
     if not old or not name:
-        con.close(); return redirect(url_for("admin"))
-    new_image=save_upload(request.files.get("image"))
-    image=new_image if new_image else old["image"]
+
+        con.close()
+
+        return redirect(
+            url_for("admin")
+        )
+
+    new_image = save_upload(
+        request.files.get("image")
+    )
+
+    image = (
+        new_image
+        if new_image
+        else old["image"]
+    )
+
     try:
-        con.execute("UPDATE categories SET name=?,image=? WHERE id=?",(name,image,cid)); con.commit()
-    except sqlite3.IntegrityError:
-        delete_local_file(new_image); flash("Esa categoría ya existe.")
+
+        con.execute(
+            """
+            UPDATE categories
+            SET
+                name=%s,
+                image=%s
+            WHERE id=%s
+            """,
+            (
+                name,
+                image,
+                cid
+            )
+        )
+
+        con.commit()
+
+    except psycopg.errors.UniqueViolation:
+
+        con.rollback()
+
+        delete_local_file(
+            new_image
+        )
+
+        flash(
+            "Esa categoría ya existe."
+        )
+
     con.close()
-    if new_image and old["image"] and old["image"] != new_image: delete_local_file(old["image"])
-    return redirect(url_for("admin"))
+
+    if (
+        new_image
+        and old["image"]
+        and old["image"] != new_image
+    ):
+
+        delete_local_file(
+            old["image"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/category/<int:cid>/delete")
 def delete_category(cid):
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); row=con.execute("SELECT image FROM categories WHERE id=?",(cid,)).fetchone(); con.execute("DELETE FROM categories WHERE id=?",(cid,)); con.commit(); con.close()
-    if row: delete_local_file(row["image"])
-    return redirect(url_for("admin"))
 
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    row = con.execute(
+        """
+        SELECT image
+        FROM categories
+        WHERE id=%s
+        """,
+        (cid,)
+    ).fetchone()
+
+    con.execute(
+        """
+        DELETE FROM categories
+        WHERE id=%s
+        """,
+        (cid,)
+    )
+
+    con.commit()
+
+    con.close()
+
+    if row:
+
+        delete_local_file(
+            row["image"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
+
+
+# ============================================================
+# PÁGINAS
+# ============================================================
 
 @app.post("/admin/page/add")
 def add_page():
-    if not session.get("admin"): return redirect(url_for("login"))
-    title=request.form.get("title","").strip(); slug=request.form.get("slug","").strip().lower().replace(" ","-"); content=request.form.get("content","").strip(); image=save_upload(request.files.get("image"))
-    if not title or not slug: delete_local_file(image); flash("Escribe título e identificador."); return redirect(url_for("admin"))
-    con=db()
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    title = request.form.get(
+        "title",
+        ""
+    ).strip()
+
+    slug = (
+        request.form.get(
+            "slug",
+            ""
+        )
+        .strip()
+        .lower()
+        .replace(" ", "-")
+    )
+
+    content = request.form.get(
+        "content",
+        ""
+    ).strip()
+
+    image = save_upload(
+        request.files.get("image")
+    )
+
+    if not title or not slug:
+
+        delete_local_file(image)
+
+        flash(
+            "Escribe título e identificador."
+        )
+
+        return redirect(
+            url_for("admin")
+        )
+
+    con = db()
+
     try:
-        order=con.execute("SELECT COALESCE(MAX(sort_order),0) FROM pages").fetchone()[0]; con.execute("INSERT INTO pages(slug,title,content,image,sort_order) VALUES(?,?,?,?,?)",(slug,title,content,image or "",order+1)); con.commit()
-    except sqlite3.IntegrityError:
-        delete_local_file(image); flash("Ese identificador ya existe. Usa otro.")
-    con.close(); return redirect(url_for("admin"))
+
+        order = con.execute(
+            """
+            SELECT COALESCE(
+                MAX(sort_order),
+                0
+            ) AS n
+            FROM pages
+            """
+        ).fetchone()["n"]
+
+        con.execute(
+            """
+            INSERT INTO pages(
+                slug,
+                title,
+                content,
+                image,
+                sort_order
+            )
+            VALUES(%s,%s,%s,%s,%s)
+            """,
+            (
+                slug,
+                title,
+                content,
+                image or "",
+                order + 1
+            )
+        )
+
+        con.commit()
+
+    except psycopg.errors.UniqueViolation:
+
+        con.rollback()
+
+        delete_local_file(image)
+
+        flash(
+            "Ese identificador ya existe. Usa otro."
+        )
+
+    con.close()
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/page/<int:page_id>/edit")
 def edit_page(page_id):
-    if not session.get("admin"): return redirect(url_for("login"))
-    title=request.form.get("title","").strip(); slug=request.form.get("slug","").strip().lower().replace(" ","-"); content=request.form.get("content","").strip()
-    if not title or not slug: return redirect(url_for("admin"))
-    con=db(); old=con.execute("SELECT image FROM pages WHERE id=?",(page_id,)).fetchone(); new_image=save_upload(request.files.get("image"))
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    title = request.form.get(
+        "title",
+        ""
+    ).strip()
+
+    slug = (
+        request.form.get(
+            "slug",
+            ""
+        )
+        .strip()
+        .lower()
+        .replace(" ", "-")
+    )
+
+    content = request.form.get(
+        "content",
+        ""
+    ).strip()
+
+    if not title or not slug:
+
+        return redirect(
+            url_for("admin")
+        )
+
+    con = db()
+
+    old = con.execute(
+        """
+        SELECT image
+        FROM pages
+        WHERE id=%s
+        """,
+        (page_id,)
+    ).fetchone()
+
+    new_image = save_upload(
+        request.files.get("image")
+    )
+
     try:
-        image=new_image if new_image else (old["image"] if old else "")
-        con.execute("UPDATE pages SET title=?,slug=?,content=?,image=? WHERE id=?",(title,slug,content,image,page_id)); con.commit()
-    except sqlite3.IntegrityError:
-        delete_local_file(new_image); flash("Ese identificador ya existe.")
+
+        image = (
+            new_image
+            if new_image
+            else (
+                old["image"]
+                if old
+                else ""
+            )
+        )
+
+        con.execute(
+            """
+            UPDATE pages
+            SET
+                title=%s,
+                slug=%s,
+                content=%s,
+                image=%s
+            WHERE id=%s
+            """,
+            (
+                title,
+                slug,
+                content,
+                image,
+                page_id
+            )
+        )
+
+        con.commit()
+
+    except psycopg.errors.UniqueViolation:
+
+        con.rollback()
+
+        delete_local_file(
+            new_image
+        )
+
+        flash(
+            "Ese identificador ya existe."
+        )
+
     con.close()
-    if new_image and old: delete_local_file(old["image"])
-    return redirect(url_for("admin"))
+
+    if new_image and old:
+
+        delete_local_file(
+            old["image"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/page/<int:page_id>/delete")
 def delete_page(page_id):
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); page=con.execute("SELECT image FROM pages WHERE id=?",(page_id,)).fetchone(); items=con.execute("SELECT image FROM page_items WHERE page_id=?",(page_id,)).fetchall(); con.execute("DELETE FROM page_items WHERE page_id=?",(page_id,)); con.execute("DELETE FROM pages WHERE id=?",(page_id,)); con.commit(); con.close()
-    if page: delete_local_file(page["image"])
-    for x in items: delete_local_file(x["image"])
-    return redirect(url_for("admin"))
 
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    page = con.execute(
+        """
+        SELECT image
+        FROM pages
+        WHERE id=%s
+        """,
+        (page_id,)
+    ).fetchone()
+
+    items = con.execute(
+        """
+        SELECT image
+        FROM page_items
+        WHERE page_id=%s
+        """,
+        (page_id,)
+    ).fetchall()
+
+    con.execute(
+        """
+        DELETE FROM page_items
+        WHERE page_id=%s
+        """,
+        (page_id,)
+    )
+
+    con.execute(
+        """
+        DELETE FROM pages
+        WHERE id=%s
+        """,
+        (page_id,)
+    )
+
+    con.commit()
+
+    con.close()
+
+    if page:
+
+        delete_local_file(
+            page["image"]
+        )
+
+    for x in items:
+
+        delete_local_file(
+            x["image"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
+
+
+# ============================================================
+# ELEMENTOS DE PÁGINAS
+# ============================================================
 
 @app.post("/admin/page/<int:page_id>/item/add")
 def add_page_item(page_id):
-    if not session.get("admin"): return redirect(url_for("login"))
-    title=request.form.get("title","").strip(); description=request.form.get("description","").strip(); image=save_upload(request.files.get("image"))
-    if not title: delete_local_file(image); flash("Escribe el nombre del elemento."); return redirect(url_for("admin"))
-    con=db(); order=con.execute("SELECT COALESCE(MAX(sort_order),0) FROM page_items WHERE page_id=?",(page_id,)).fetchone()[0]; con.execute("INSERT INTO page_items(page_id,title,description,image,sort_order) VALUES(?,?,?,?,?)",(page_id,title,description,image or "",order+1)); con.commit(); con.close(); return redirect(url_for("admin"))
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    title = request.form.get(
+        "title",
+        ""
+    ).strip()
+
+    description = request.form.get(
+        "description",
+        ""
+    ).strip()
+
+    image = save_upload(
+        request.files.get("image")
+    )
+
+    if not title:
+
+        delete_local_file(image)
+
+        flash(
+            "Escribe el nombre del elemento."
+        )
+
+        return redirect(
+            url_for("admin")
+        )
+
+    con = db()
+
+    order = con.execute(
+        """
+        SELECT COALESCE(
+            MAX(sort_order),
+            0
+        ) AS n
+        FROM page_items
+        WHERE page_id=%s
+        """,
+        (page_id,)
+    ).fetchone()["n"]
+
+    con.execute(
+        """
+        INSERT INTO page_items(
+            page_id,
+            title,
+            description,
+            image,
+            sort_order
+        )
+        VALUES(%s,%s,%s,%s,%s)
+        """,
+        (
+            page_id,
+            title,
+            description,
+            image or "",
+            order + 1
+        )
+    )
+
+    con.commit()
+
+    con.close()
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/page/item/<int:item_id>/edit")
 def edit_page_item(item_id):
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); old=con.execute("SELECT image FROM page_items WHERE id=?",(item_id,)).fetchone(); title=request.form.get("title","").strip(); description=request.form.get("description","").strip(); new_image=save_upload(request.files.get("image"))
+
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    old = con.execute(
+        """
+        SELECT image
+        FROM page_items
+        WHERE id=%s
+        """,
+        (item_id,)
+    ).fetchone()
+
+    title = request.form.get(
+        "title",
+        ""
+    ).strip()
+
+    description = request.form.get(
+        "description",
+        ""
+    ).strip()
+
+    new_image = save_upload(
+        request.files.get("image")
+    )
+
     if title:
-        image=new_image if new_image else (old["image"] if old else ""); con.execute("UPDATE page_items SET title=?,description=?,image=? WHERE id=?",(title,description,image,item_id)); con.commit()
+
+        image = (
+            new_image
+            if new_image
+            else (
+                old["image"]
+                if old
+                else ""
+            )
+        )
+
+        con.execute(
+            """
+            UPDATE page_items
+            SET
+                title=%s,
+                description=%s,
+                image=%s
+            WHERE id=%s
+            """,
+            (
+                title,
+                description,
+                image,
+                item_id
+            )
+        )
+
+        con.commit()
+
     con.close()
-    if new_image and old: delete_local_file(old["image"])
-    return redirect(url_for("admin"))
+
+    if new_image and old:
+
+        delete_local_file(
+            old["image"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
 
 
 @app.post("/admin/page/item/<int:item_id>/delete")
 def delete_page_item(item_id):
-    if not session.get("admin"): return redirect(url_for("login"))
-    con=db(); row=con.execute("SELECT image FROM page_items WHERE id=?",(item_id,)).fetchone(); con.execute("DELETE FROM page_items WHERE id=?",(item_id,)); con.commit(); con.close();
-    if row: delete_local_file(row["image"])
-    return redirect(url_for("admin"))
 
+    if not session.get("admin"):
+
+        return redirect(
+            url_for("login")
+        )
+
+    con = db()
+
+    row = con.execute(
+        """
+        SELECT image
+        FROM page_items
+        WHERE id=%s
+        """,
+        (item_id,)
+    ).fetchone()
+
+    con.execute(
+        """
+        DELETE FROM page_items
+        WHERE id=%s
+        """,
+        (item_id,)
+    )
+
+    con.commit()
+
+    con.close()
+
+    if row:
+
+        delete_local_file(
+            row["image"]
+        )
+
+    return redirect(
+        url_for("admin")
+    )
+
+
+# ============================================================
+# CERRAR SESIÓN
+# ============================================================
 
 @app.get("/logout")
 def logout():
-    session.clear(); return redirect(url_for("index"))
 
+    session.clear()
+
+    return redirect(
+        url_for("index")
+    )
+
+
+# ============================================================
+# API PRODUCTOS
+# ============================================================
 
 @app.get("/api/products")
 def api_products():
-    con=db(); rows=[dict(x) for x in con.execute("SELECT * FROM products WHERE active=1").fetchall()]; con.close(); return jsonify(rows)
 
+    con = db()
+
+    rows = [
+        dict(x)
+        for x in con.execute(
+            """
+            SELECT *
+            FROM products
+            WHERE active=1
+            """
+        ).fetchall()
+    ]
+
+    con.close()
+
+    return jsonify(rows)
+
+
+# ============================================================
+# INICIAR
+# ============================================================
 
 init_db()
-if __name__ == "__main__": app.run(debug=True)
+
+
+if __name__ == "__main__":
+
+    app.run(
+        debug=True
+    )
